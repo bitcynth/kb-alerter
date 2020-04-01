@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/google/gousb"
+	"github.com/bitcynth/cynhid"
 )
 
 var colorData2 = []byte{
@@ -34,8 +34,7 @@ var changeSettingMaybe = []byte{
 }
 
 type DuckyKB struct {
-	OutEP *gousb.OutEndpoint
-	InEP  *gousb.InEndpoint
+	Device *cynhid.Device
 }
 
 type alertManagerAlertJSON struct {
@@ -74,45 +73,34 @@ func main() {
 	listenAddr := flag.String("listen", ":9095", "the listen address for http")
 	flag.Parse()
 
-	ctx := gousb.NewContext()
-	defer ctx.Close()
-
-	dev, err := ctx.OpenDeviceWithVIDPID(0x04d9, 0x0348)
-	if err != nil || dev == nil {
-		log.Fatalf("failed to open usb device: %v", err)
+	err := cynhid.Init()
+	if err != nil {
+		log.Fatalf("failed to initialize hidapi: %v", err)
 	}
+	defer cynhid.Exit()
 
-	err = dev.SetAutoDetach(true)
+	devInfos, err := cynhid.Enumerate(0x04d9, 0x0348)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer dev.SetAutoDetach(false)
 
-	cfg, err := dev.Config(1)
+	var devPath string
+	for _, devInfo := range devInfos {
+		if devInfo.InterfaceNumber == 1 {
+			devPath = devInfo.Path
+		}
+	}
+
+	dev, err := cynhid.OpenPath(devPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer cfg.Close()
+	defer dev.Close()
 
-	intf, err := cfg.Interface(1, 0)
-	if err != nil {
-		log.Fatal("Interface(): ", err)
-	}
-	defer intf.Close()
-
-	ep, err := intf.OutEndpoint(4)
-	if err != nil {
-		log.Fatal("OutEndpoint(): ", err)
-	}
-
-	inEp, err := intf.InEndpoint(3)
-	if err != nil {
-		log.Fatal("InEndpoint(): ", err)
-	}
+	dev.SetNonblocking(true)
 
 	kb := &DuckyKB{
-		InEP:  inEp,
-		OutEP: ep,
+		Device: dev,
 	}
 
 	fmt.Printf("Firmware Version: %s\n", kb.GetFirmwareVersion())
@@ -173,18 +161,17 @@ func (kb *DuckyKB) WriteToDev(data []byte) (int, error) {
 		data = append(data, 0x00)
 	}
 
-	n, err := kb.OutEP.Write(data)
+	n, err := kb.Device.Write(data, 64)
 	return n, err
 }
 
 func (kb *DuckyKB) ReadFromDev() ([]byte, error) {
-	buf := make([]byte, 64)
-	n, err := kb.InEP.Read(buf)
+	buf, err := kb.Device.Read(64)
 	if err != nil {
 		return nil, nil
 	}
-	//log.Printf("read: %x\n", buf[:n])
-	return buf[:n], nil
+	//log.Printf("read: %x\n", buf)
+	return buf, nil
 }
 
 func (kb *DuckyKB) GetFirmwareVersion() string {
@@ -192,6 +179,7 @@ func (kb *DuckyKB) GetFirmwareVersion() string {
 	if err != nil {
 		log.Fatal(err)
 	}
+	time.Sleep(time.Millisecond * 5)
 
 	resp, err := kb.ReadFromDev()
 	if err != nil {
@@ -215,18 +203,7 @@ func (kb *DuckyKB) GetFirmwareVersion() string {
 
 func (kb *DuckyKB) SetBacklight(r int, g int, b int, brightness int, pattern int) {
 	kb.WriteToDev(changeSettingMaybe)
-	d, _ := kb.ReadFromDev()
-	log.Print(d)
-
 	kb.WriteToDev(colorData1)
-	d, _ = kb.ReadFromDev()
-	log.Print(d)
-
 	kb.WriteToDev(append(usbPacketSetColorPrefix, byte(r), byte(g), byte(b), byte(brightness)))
-	d, _ = kb.ReadFromDev()
-	log.Print(d)
-
 	kb.WriteToDev(append(usbPacketSetPatternPrefix, byte(pattern)))
-	d, _ = kb.ReadFromDev()
-	log.Print(d)
 }
